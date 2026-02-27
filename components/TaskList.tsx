@@ -144,18 +144,18 @@ export default function TaskList({ tasks, onSelect, onComplete }: TaskListProps)
                       event.stopPropagation();
                       handleConfirm(task.id);
                     }}
-                  ref={(node) => {
-                    if (isConfirming) {
-                      confirmingButtonRef.current = node;
-                    } else if (confirmingButtonRef.current === node) {
-                      confirmingButtonRef.current = null;
-                    }
-                  }}
-                  className={`absolute right-4 top-4 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-all duration-300 ${
-                    isConfirming
-                      ? "w-auto border-emerald-200/60 bg-emerald-300/25 text-emerald-50"
-                      : "w-[44px] justify-center border-white/30 bg-black/25 text-white hover:border-white/50"
-                  } ${isExiting ? "opacity-30" : ""}`}
+                    ref={(node) => {
+                      if (isConfirming) {
+                        confirmingButtonRef.current = node;
+                      } else if (confirmingButtonRef.current === node) {
+                        confirmingButtonRef.current = null;
+                      }
+                    }}
+                    className={`absolute right-4 top-4 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-all duration-300 ${
+                      isConfirming
+                        ? "w-auto border-emerald-200/60 bg-emerald-300/25 text-emerald-50"
+                        : "w-[44px] justify-center border-white/30 bg-black/25 text-white hover:border-white/50"
+                    } ${isExiting ? "opacity-30" : ""}`}
                   >
                     <span><img src="https://avatars.githubusercontent.com/u/41039781?s=200&v=4" alt="Krull" width="16" height="16" className="rounded-full" /></span>
                     {isConfirming ? <span>confirm?</span> : null}

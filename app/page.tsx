@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Session } from "@supabase/supabase-js";
 import { createTimeline } from "animejs";
 import TaskModal, { PriorityLevel, TaskPayload } from "@/components/TaskModal";
 import TaskList, { Task } from "@/components/TaskList";
 import TaskDetailsModal from "@/components/TaskDetailsModal";
+import AuthPanel from "@/components/AuthPanel";
+import { createClient } from "@/utils/supabase/client";
 
 const priorityLabels: Record<PriorityLevel, string> = {
   nit: "Nit",
@@ -28,6 +31,9 @@ const priorityOrder: Record<PriorityLevel, number> = {
 };
 
 const STORAGE_KEY = "ibowano_tasks";
+const priorityValues: PriorityLevel[] = ["nit", "soon", "asap", "yesterday"];
+
+type View = "home" | "list" | "auth";
 
 function formatDeadline(deadline: string) {
   const parsed = new Date(deadline);
@@ -66,57 +72,195 @@ function createTaskId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function getViewPosition(view: View, width: number, height: number) {
+  switch (view) {
+    case "auth":
+      return { x: 0, y: 0 };
+    case "list":
+      return { x: -width, y: -height };
+    case "home":
+    default:
+      return { x: 0, y: -height };
+  }
+}
+
+function isValidPriority(value: string): value is PriorityLevel {
+  return priorityValues.includes(value as PriorityLevel);
+}
+
+function normalizeTask(task: Record<string, unknown>): Task | null {
+  const title = typeof task.title === "string" ? task.title : "";
+  const problem = typeof task.problem === "string" ? task.problem : "";
+  const deadline = typeof task.deadline === "string" ? task.deadline : "";
+  const priority = typeof task.priority === "string" && isValidPriority(task.priority)
+    ? task.priority
+    : "soon";
+  const id = typeof task.id === "string" ? task.id : createTaskId();
+
+  if (!title || !problem || !deadline) {
+    return null;
+  }
+
+  return { id, title, problem, deadline, priority };
+}
+
+function loadLocalTasks() {
+  if (typeof window === "undefined") return [];
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (!stored) return [];
+    const parsed = JSON.parse(stored);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((task) => normalizeTask(task as Record<string, unknown>))
+      .filter((task): task is Task => Boolean(task));
+  } catch (error) {
+    console.warn("Could not load stored tasks", error);
+    return [];
+  }
+}
+
 export default function Home() {
+  const supabaseConfigured = Boolean(
+    process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY,
+  );
+  const supabaseClient = useMemo(
+    () => (supabaseConfigured ? createClient() : null),
+    [supabaseConfigured],
+  );
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      const stored = window.localStorage.getItem(STORAGE_KEY);
-      if (!stored) return [];
-      const parsed = JSON.parse(stored);
-      if (!Array.isArray(parsed)) return [];
-      return parsed
-        .filter(
-          (task) =>
-            task &&
-            typeof task.title === "string" &&
-            typeof task.problem === "string" &&
-            typeof task.deadline === "string" &&
-            typeof task.priority === "string",
-        )
-        .map((task) => ({
-          ...task,
-          id: task.id ?? createTaskId(),
-        }));
-    } catch (error) {
-      console.warn("Could not load stored tasks", error);
-      return [];
-    }
-  });
-  const [view, setView] = useState<"home" | "list">("home");
+  const [tasks, setTasks] = useState<Task[]>(() => loadLocalTasks());
+  const [view, setView] = useState<View>("home");
+  const [session, setSession] = useState<Session | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthBusy, setIsAuthBusy] = useState(false);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const isTransitioningRef = useRef(false);
   const isModalActive = isModalOpen || Boolean(selectedTask);
+  const [viewport, setViewport] = useState(() => {
+    if (typeof window === "undefined") {
+      return { width: 0, height: 0 };
+    }
+    return { width: window.innerWidth, height: window.innerHeight };
+  });
 
   const topTask = useMemo(() => pickTopTask(tasks), [tasks]);
   const readableDeadline = topTask?.deadline ? formatDeadline(topTask.deadline) : null;
+  const safeWidth = viewport.width || (typeof window !== "undefined" ? window.innerWidth : 0);
+  const safeHeight = viewport.height || (typeof window !== "undefined" ? window.innerHeight : 0);
+  const currentPosition = getViewPosition(view, safeWidth, safeHeight);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const handleResize = () => {
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  const fetchSupabaseTasks = useCallback(async (activeSession: Session) => {
+    if (!supabaseClient) return;
+    const { data, error } = await supabaseClient
+      .from("tasks")
+      .select("id,title,problem,deadline,priority")
+      .eq("user_id", activeSession.user.id)
+      .order("deadline", { ascending: true });
+
+    if (error) {
+      console.warn("Could not load tasks from Supabase", error);
+      return;
+    }
+
+    const sanitized = (data ?? [])
+      .map((task) => normalizeTask(task as Record<string, unknown>))
+      .filter((task): task is Task => Boolean(task));
+    setTasks(sanitized);
+  }, [supabaseClient]);
+
+  const syncSessionTasks = useCallback(
+    async (activeSession: Session) => {
+      if (typeof window === "undefined") return;
+      if (!supabaseClient) return;
+      const localTasks = loadLocalTasks();
+      if (localTasks.length) {
+        const payload = localTasks.map((task) => ({
+          id: task.id,
+          user_id: activeSession.user.id,
+          title: task.title,
+          problem: task.problem,
+          deadline: task.deadline,
+          priority: task.priority,
+        }));
+        const { error } = await supabaseClient.from("tasks").upsert(payload, { onConflict: "id" });
+        if (error) {
+          console.warn("Could not sync local tasks to Supabase", error);
+          setTasks(localTasks);
+          return;
+        }
+        window.localStorage.removeItem(STORAGE_KEY);
+      }
+
+      await fetchSupabaseTasks(activeSession);
+    },
+    [fetchSupabaseTasks, supabaseClient],
+  );
+
+  useEffect(() => {
+    if (!supabaseClient) return;
+    let isActive = true;
+
+    const initSession = async () => {
+      const { data } = await supabaseClient.auth.getSession();
+      if (!isActive) return;
+      setSession(data.session);
+      if (data.session) {
+        await syncSessionTasks(data.session);
+      } else {
+        setTasks(loadLocalTasks());
+      }
+    };
+
+    void initSession();
+
+    const { data: authData } = supabaseClient.auth.onAuthStateChange((_event, nextSession) => {
+      if (!isActive) return;
+      setSession(nextSession);
+      if (nextSession) {
+        void syncSessionTasks(nextSession);
+      } else {
+        setTasks(loadLocalTasks());
+      }
+    });
+
+    return () => {
+      isActive = false;
+      authData.subscription.unsubscribe();
+    };
+  }, [supabaseClient, syncSessionTasks]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (session) return;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
-  }, [tasks]);
+  }, [session, tasks]);
 
   const animateTo = useCallback(
-    (target: "home" | "list") => {
+    (target: View) => {
       if (!frameRef.current || target === view || isTransitioningRef.current || isModalActive) {
         return;
       }
 
       isTransitioningRef.current = true;
-      const translateX = target === "list" ? "-100vw" : "0vw";
+      const width = viewport.width || (typeof window !== "undefined" ? window.innerWidth : 0);
+      const height = viewport.height || (typeof window !== "undefined" ? window.innerHeight : 0);
+      const { x: translateX, y: translateY } = getViewPosition(target, width, height);
 
-      createTimeline({
+      const timeline = createTimeline({
+        autoplay: false,
         onComplete: () => {
           isTransitioningRef.current = false;
           setView(target);
@@ -125,24 +269,32 @@ export default function Home() {
         .add(frameRef.current, {
           scale: 0.92,
           duration: 220,
-          easing: "easeInOutQuad",
+          ease: "inOutQuad",
         })
         .add(frameRef.current, {
           translateX,
+          translateY,
           duration: 520,
-          easing: "easeInOutCubic",
+          ease: "inOutCubic",
         })
         .add(frameRef.current, {
           scale: 1,
           duration: 240,
-          easing: "easeOutCubic",
+          ease: "outCubic",
         });
+
+      timeline.play();
     },
-    [isModalActive, view],
+    [isModalActive, view, viewport.height, viewport.width],
   );
 
-  const toggleView = useCallback(() => {
+  const toggleListView = useCallback(() => {
+    if (view === "auth") return;
     animateTo(view === "home" ? "list" : "home");
+  }, [animateTo, view]);
+
+  const toggleAuthView = useCallback(() => {
+    animateTo(view === "auth" ? "home" : "auth");
   }, [animateTo, view]);
 
   useEffect(() => {
@@ -150,23 +302,94 @@ export default function Home() {
       if (event.key.toLowerCase() === "d") {
         if (isModalActive) return;
         event.preventDefault();
-        toggleView();
+        toggleListView();
+      }
+      if (event.key.toLowerCase() === "w") {
+        if (isModalActive) return;
+        event.preventDefault();
+        toggleAuthView();
       }
     };
 
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [isModalActive, toggleView]);
+  }, [isModalActive, toggleAuthView, toggleListView]);
 
-  const handleNewTask = (payload: TaskPayload) => {
+  const handleNewTask = async (payload: TaskPayload) => {
     const newTask: Task = { ...payload, id: createTaskId() };
     setTasks((prev) => [...prev, newTask]);
     setIsModalOpen(false);
+    if (!session || !supabaseClient) return;
+    const { error } = await supabaseClient.from("tasks").insert({
+      id: newTask.id,
+      user_id: session.user.id,
+      title: newTask.title,
+      problem: newTask.problem,
+      deadline: newTask.deadline,
+      priority: newTask.priority,
+    });
+    if (error) {
+      console.warn("Could not save task to Supabase", error);
+    }
   };
 
-  const handleCompleteTask = (taskId: string) => {
+  const handleCompleteTask = async (taskId: string) => {
     setTasks((prev) => prev.filter((task) => task.id !== taskId));
     setSelectedTask((prev) => (prev?.id === taskId ? null : prev));
+    if (!session || !supabaseClient) return;
+    const { error } = await supabaseClient
+      .from("tasks")
+      .delete()
+      .eq("id", taskId)
+      .eq("user_id", session.user.id);
+    if (error) {
+      console.warn("Could not delete task from Supabase", error);
+    }
+  };
+
+  const handleSignIn = async (email: string, password: string) => {
+    setAuthError(null);
+    setIsAuthBusy(true);
+    if (!supabaseClient) {
+      setAuthError("Supabase is not configured.");
+      setIsAuthBusy(false);
+      return;
+    }
+    const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error) {
+      setAuthError(error.message);
+    }
+    setIsAuthBusy(false);
+  };
+
+  const handleSignUp = async (email: string, password: string) => {
+    setAuthError(null);
+    setIsAuthBusy(true);
+    if (!supabaseClient) {
+      setAuthError("Supabase is not configured.");
+      setIsAuthBusy(false);
+      return;
+    }
+    const { error } = await supabaseClient.auth.signUp({ email, password });
+    if (error) {
+      setAuthError(error.message);
+    }
+    setIsAuthBusy(false);
+  };
+
+  const handleSignOut = async () => {
+    setAuthError(null);
+    setIsAuthBusy(true);
+    if (!supabaseClient) {
+      setAuthError("Supabase is not configured.");
+      setIsAuthBusy(false);
+      return;
+    }
+    const { error } = await supabaseClient.auth.signOut();
+    if (error) {
+      setAuthError(error.message);
+    }
+    setIsAuthBusy(false);
   };
 
   return (
@@ -202,18 +425,48 @@ export default function Home() {
         >
           List
         </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (isModalActive) return;
+            animateTo("auth");
+          }}
+          className={`rounded-full border px-4 py-2 text-xs font-semibold transition active:opacity-60 ${
+            view === "auth"
+              ? "border-cyan-300/70 bg-cyan-400/20 text-white"
+              : "border-white/20 bg-white/10 text-slate-200 hover:border-white/40"
+          }`}
+        >
+          Auth
+        </button>
       </div>
 
       <div className="fixed left-4 top-4 z-40 text-xs text-slate-300">
-        Press <span className="rounded bg-white/10 px-1 py-0.5 font-mono text-[11px]">D</span> to toggle views
+        Press{" "}
+        <span className="rounded bg-white/10 px-1 py-0.5 font-mono text-[11px]">D</span> for list and{" "}
+        <span className="rounded bg-white/10 px-1 py-0.5 font-mono text-[11px]">W</span> for auth
       </div>
 
       <div
         ref={frameRef}
-        className="flex min-h-screen w-[200vw] transform-gpu"
-        style={{ transform: "translateX(0vw) scale(1)" }}
+        className="grid h-[200vh] w-[200vw] grid-cols-[100vw_100vw] grid-rows-[100vh_100vh] transform-gpu"
+        style={{
+          transform: `translateX(${currentPosition.x}px) translateY(${currentPosition.y}px) scale(1)`,
+        }}
       >
-        <section className="flex w-screen justify-center">
+        <section className="col-start-1 row-start-1 flex w-screen justify-center">
+          <AuthPanel
+            session={session}
+            isConfigured={supabaseConfigured}
+            isBusy={isAuthBusy}
+            errorMessage={authError}
+            onSignIn={handleSignIn}
+            onSignUp={handleSignUp}
+            onSignOut={handleSignOut}
+          />
+        </section>
+
+        <section className="col-start-1 row-start-2 flex w-screen justify-center">
           <main className="mx-auto flex max-w-5xl flex-col gap-8 px-6 py-14">
             <header className="space-y-3">
               <p className="text-xs uppercase tracking-[0.3em] text-cyan-300">IBOWANO</p>
@@ -330,7 +583,7 @@ export default function Home() {
           </main>
         </section>
 
-        <section className="flex w-screen items-stretch">
+        <section className="col-start-2 row-start-2 flex w-screen items-stretch">
           <TaskList
             tasks={tasks}
             onSelect={(task) => setSelectedTask(task)}
