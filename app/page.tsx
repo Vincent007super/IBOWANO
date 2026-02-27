@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Session } from "@supabase/supabase-js";
 import { createTimeline } from "animejs";
 import TaskModal, { PriorityLevel, TaskPayload } from "@/components/TaskModal";
@@ -145,6 +145,7 @@ export default function Home() {
     }
     return { width: window.innerWidth, height: window.innerHeight };
   });
+  const [hasMeasured, setHasMeasured] = useState(false);
 
   const topTask = useMemo(() => pickTopTask(tasks), [tasks]);
   const readableDeadline = topTask?.deadline ? formatDeadline(topTask.deadline) : null;
@@ -152,10 +153,11 @@ export default function Home() {
   const safeHeight = viewport.height || (typeof window !== "undefined" ? window.innerHeight : 0);
   const currentPosition = getViewPosition(view, safeWidth, safeHeight);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (typeof window === "undefined") return;
     const handleResize = () => {
       setViewport({ width: window.innerWidth, height: window.innerHeight });
+      setHasMeasured(true);
     };
     handleResize();
     window.addEventListener("resize", handleResize);
@@ -250,6 +252,7 @@ export default function Home() {
 
   const animateTo = useCallback(
     (target: View) => {
+      if (!hasMeasured) return;
       if (!frameRef.current || target === view || isTransitioningRef.current || isModalActive) {
         return;
       }
@@ -285,7 +288,7 @@ export default function Home() {
 
       timeline.play();
     },
-    [isModalActive, view, viewport.height, viewport.width],
+    [hasMeasured, isModalActive, view, viewport.height, viewport.width],
   );
 
   const toggleListView = useCallback(() => {
@@ -451,7 +454,9 @@ export default function Home() {
         ref={frameRef}
         className="grid h-[200vh] w-[200vw] grid-cols-[100vw_100vw] grid-rows-[100vh_100vh] transform-gpu"
         style={{
-          transform: `translateX(${currentPosition.x}px) translateY(${currentPosition.y}px) scale(1)`,
+          transform: hasMeasured
+            ? `translateX(${currentPosition.x}px) translateY(${currentPosition.y}px) scale(1)`
+            : "translateX(0px) translateY(-100vh) scale(1)",
         }}
       >
         <section className="col-start-1 row-start-1 flex w-screen justify-center">
