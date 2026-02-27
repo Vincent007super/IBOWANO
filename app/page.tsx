@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createTimeline } from "animejs";
 import TaskModal, { PriorityLevel, TaskPayload } from "@/components/TaskModal";
 import TaskList, { Task } from "@/components/TaskList";
+import TaskDetailsModal from "@/components/TaskDetailsModal";
 
 const priorityLabels: Record<PriorityLevel, string> = {
   nit: "Nit",
@@ -93,8 +94,10 @@ export default function Home() {
     }
   });
   const [view, setView] = useState<"home" | "list">("home");
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const isTransitioningRef = useRef(false);
+  const isModalActive = isModalOpen || Boolean(selectedTask);
 
   const topTask = useMemo(() => pickTopTask(tasks), [tasks]);
   const readableDeadline = topTask?.deadline ? formatDeadline(topTask.deadline) : null;
@@ -106,7 +109,7 @@ export default function Home() {
 
   const animateTo = useCallback(
     (target: "home" | "list") => {
-      if (!frameRef.current || target === view || isTransitioningRef.current) {
+      if (!frameRef.current || target === view || isTransitioningRef.current || isModalActive) {
         return;
       }
 
@@ -135,7 +138,7 @@ export default function Home() {
           easing: "easeOutCubic",
         });
     },
-    [view],
+    [isModalActive, view],
   );
 
   const toggleView = useCallback(() => {
@@ -145,6 +148,7 @@ export default function Home() {
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() === "d") {
+        if (isModalActive) return;
         event.preventDefault();
         toggleView();
       }
@@ -152,12 +156,17 @@ export default function Home() {
 
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [toggleView]);
+  }, [isModalActive, toggleView]);
 
   const handleNewTask = (payload: TaskPayload) => {
     const newTask: Task = { ...payload, id: createTaskId() };
     setTasks((prev) => [...prev, newTask]);
     setIsModalOpen(false);
+  };
+
+  const handleCompleteTask = (taskId: string) => {
+    setTasks((prev) => prev.filter((task) => task.id !== taskId));
+    setSelectedTask((prev) => (prev?.id === taskId ? null : prev));
   };
 
   return (
@@ -167,7 +176,10 @@ export default function Home() {
       <div className="fixed right-4 top-4 z-40 flex items-center gap-2">
         <button
           type="button"
-          onClick={() => animateTo("home")}
+          onClick={() => {
+            if (isModalActive) return;
+            animateTo("home");
+          }}
           className={`rounded-full border px-4 py-2 text-xs font-semibold transition active:opacity-60 ${
             view === "home"
               ? "border-cyan-300/70 bg-cyan-400/20 text-white"
@@ -178,7 +190,10 @@ export default function Home() {
         </button>
         <button
           type="button"
-          onClick={() => animateTo("list")}
+          onClick={() => {
+            if (isModalActive) return;
+            animateTo("list");
+          }}
           className={`rounded-full border px-4 py-2 text-xs font-semibold transition active:opacity-60 ${
             view === "list"
               ? "border-cyan-300/70 bg-cyan-400/20 text-white"
@@ -267,7 +282,10 @@ export default function Home() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => animateTo("list")}
+                  onClick={() => {
+                    if (isModalActive) return;
+                    animateTo("list");
+                  }}
                   className="rounded-full border border-white/20 bg-white/10 px-4 py-2 text-xs font-semibold text-white transition hover:border-white/40 hover:bg-white/15 active:opacity-70"
                 >
                   View list
@@ -313,7 +331,11 @@ export default function Home() {
         </section>
 
         <section className="flex w-screen items-stretch">
-          <TaskList tasks={tasks} />
+          <TaskList
+            tasks={tasks}
+            onSelect={(task) => setSelectedTask(task)}
+            onComplete={handleCompleteTask}
+          />
         </section>
       </div>
 
@@ -323,6 +345,14 @@ export default function Home() {
           onSubmit={handleNewTask}
         />
       ) : null}
+
+      <TaskDetailsModal
+        task={selectedTask}
+        onClose={() => setSelectedTask(null)}
+        formatDeadline={formatDeadline}
+        priorityLabels={priorityLabels}
+        priorityNotes={priorityNotes}
+      />
     </div>
   );
 }
